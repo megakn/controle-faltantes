@@ -588,12 +588,12 @@ function todayISO(){ return new Date().toISOString().slice(0,10); }
 
 async function loadState(){
   try{
-    const r = await window.storage.get('faltantes:current', false);
-    if(r && r.value) state = JSON.parse(r.value);
+    const raw = localStorage.getItem('faltantes:current');
+    if(raw) state = JSON.parse(raw);
   }catch(e){ /* nada salvo ainda */ }
   try{
-    const r = await window.storage.get('faltantes:history', false);
-    if(r && r.value) history = JSON.parse(r.value);
+    const raw = localStorage.getItem('faltantes:history');
+    if(raw) history = JSON.parse(raw);
   }catch(e){ history = []; }
 
   // A tabela de causas começa em branco — cada causa só aparece quando é reconhecida
@@ -608,11 +608,11 @@ async function loadState(){
 }
 
 async function saveState(){
-  try{ await window.storage.set('faltantes:current', JSON.stringify(state), false); }
+  try{ localStorage.setItem('faltantes:current', JSON.stringify(state)); }
   catch(e){ showToast('Não foi possível salvar automaticamente.'); }
 }
 async function saveHistory(){
-  try{ await window.storage.set('faltantes:history', JSON.stringify(history), false); }
+  try{ localStorage.setItem('faltantes:history', JSON.stringify(history)); }
   catch(e){ /* silencioso */ }
 }
 
@@ -818,18 +818,25 @@ function unclassify(idx){
   saveState(); render();
 }
 
-// Causas ativas + quaisquer causas "orfãs" (removidas da lista mas com itens já classificados)
+// Causas ativas COM pelo menos 1 pacote classificado, + quaisquer causas "orfãs"
+// (removidas da lista mas com itens já classificados). Uma causa recém-criada ou um chip
+// ligado manualmente só aparece aqui quando a análise realmente encontrar essa causa nos
+// IDs colados — até lá, ela existe só como opção no seletor de chips, sem poluir a tabela.
 function displayCauses(){
-  const active = state.causes.filter(c=>c.active !== false).map(c=>({...c}));
-  const activeKeys = new Set(active.map(c=>c.key));
+  const activeAll = state.causes.filter(c=>c.active !== false);
+  const countByKey = {};
+  state.classified.forEach(item=>{ countByKey[item.cause] = (countByKey[item.cause]||0) + 1; });
+
+  const shown = activeAll.filter(c => (countByKey[c.key]||0) > 0).map(c=>({...c}));
+  const shownKeys = new Set(shown.map(c=>c.key));
   const seen = new Set();
   state.classified.forEach(item=>{
-    if(!activeKeys.has(item.cause) && !seen.has(item.cause)){
+    if(!shownKeys.has(item.cause) && !seen.has(item.cause)){
       seen.add(item.cause);
-      active.push({ key:item.cause, label:item.label, color:item.color, desc:item.desc, icon:item.icon || iconForCause(item.label), orphan:true });
+      shown.push({ key:item.cause, label:item.label, color:item.color, desc:item.desc, icon:item.icon || iconForCause(item.label), orphan:true });
     }
   });
-  return active;
+  return shown;
 }
 
 function counts(){
@@ -838,6 +845,14 @@ function counts(){
   state.classified.forEach(item => { if(c[item.cause]!==undefined) c[item.cause]++; });
   const total = state.classified.length;
   return {c, total};
+}
+
+// Mesma lista de displayCauses(), mas ordenada da maior contagem pra menor —
+// usada em todo lugar que mostra o ranking (tabela, faixa, resumo, imagem).
+function sortedDisplayCauses(){
+  const causes = displayCauses();
+  const {c} = counts();
+  return causes.sort((a,b) => (c[b.key]||0) - (c[a.key]||0));
 }
 
 function render(){
@@ -864,7 +879,7 @@ function render(){
   }
 
   // dashboard
-  const displayed = displayCauses();
+  const displayed = sortedDisplayCauses();
   const {c, total} = counts();
   document.getElementById('totalCount').textContent = total;
   document.getElementById('totalPct').textContent = total > 0 ? '100%' : '—';
@@ -931,7 +946,7 @@ function render(){
 }
 
 function buildSummaryText(){
-  const causes = displayCauses();
+  const causes = sortedDisplayCauses();
   const {c, total} = counts();
   const lines = [`ANÁLISE FALTANTES ${state.cycle} — ${state.date}`, ''];
   causes.forEach(cause=>{
@@ -957,7 +972,7 @@ async function archiveCurrentCycle(){
   const {c, total} = counts();
   history.unshift({
     cycle: state.cycle, date: state.date,
-    causes: displayCauses(),
+    causes: sortedDisplayCauses(),
     counts: c, total,
     finishedAt: new Date().toISOString()
   });
@@ -1255,57 +1270,57 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
   ctx.fillRect(0, 0, W, 6);
 
   // marca: nome da empresa (maior, em destaque) + ancora
-  const markSize = 58;
+  const markSize = 66;
   ctx.fillStyle = '#e8edf7';
-  ctx.font = '700 44px "Space Grotesk", sans-serif';
+  ctx.font = '700 50px "Space Grotesk", sans-serif';
   ctx.textBaseline = 'middle';
   ctx.fillText('KUEHNE+NAGEL', marginX, y + markSize/2 + 2);
   const nameWidth = ctx.measureText('KUEHNE+NAGEL').width;
   ctx.textBaseline = 'alphabetic';
   drawAnchorMark(ctx, marginX + nameWidth + 20 + markSize/2, y + markSize/2, markSize/2 - 4, '#2fd6c4');
-  y += markSize + 50;
+  y += markSize + 54;
 
   // titulo — cabe numa linha só, encolhendo a fonte se precisar
   const titleText = 'ANÁLISE DOS PACOTES FALTANTES';
   const maxTitleWidth = W - marginX*2;
-  let titleSize = 44;
+  let titleSize = 52;
   ctx.font = `700 ${titleSize}px "Space Grotesk", sans-serif`;
-  while(ctx.measureText(titleText).width > maxTitleWidth && titleSize > 24){
+  while(ctx.measureText(titleText).width > maxTitleWidth && titleSize > 30){
     titleSize -= 2;
     ctx.font = `700 ${titleSize}px "Space Grotesk", sans-serif`;
   }
   ctx.fillStyle = '#e8edf7';
   ctx.fillText(titleText, marginX, y);
-  y += titleSize + 30;
+  y += titleSize + 32;
 
-  ctx.font = '600 30px Inter, sans-serif';
+  ctx.font = '600 36px Inter, sans-serif';
   ctx.fillStyle = '#2fd6c4';
   const dateLabel = state.date ? new Date(state.date+'T00:00:00').toLocaleDateString('pt-BR') : '';
   ctx.fillText(`${state.cycle}  ·  ${dateLabel}`, marginX, y);
-  y += 46;
+  y += 50;
 
   ctx.strokeStyle = 'rgba(255,255,255,.14)';
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
-  y += 48;
+  y += 50;
 
   // cabecalho da tabela
-  ctx.font = '600 20px Inter, sans-serif';
+  ctx.font = '600 24px Inter, sans-serif';
   ctx.fillStyle = '#5d6884';
   ctx.fillText('CAUSA', marginX, y);
   ctx.textAlign = 'right';
-  ctx.fillText('CONTAGEM DE PACOTES', W - marginX - 130, y);
+  ctx.fillText('CONTAGEM DE PACOTES', W - marginX - 140, y);
   ctx.fillText('PERCENTUAL', W - marginX, y);
   ctx.textAlign = 'left';
-  y += 18;
+  y += 20;
   ctx.strokeStyle = 'rgba(255,255,255,.08)';
   ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
-  y += compact ? 46 : 54;
+  y += compact ? 54 : 62;
 
   const {c, total} = counts();
-  const rowFont = compact ? 27 : 31;
-  const rowGap = compact ? 62 : 82;
-  const iconSize = compact ? 30 : 36;
+  const rowFont = compact ? 34 : 39;
+  const rowGap = compact ? 78 : 102;
+  const iconSize = compact ? 38 : 44;
 
   causes.forEach(cause=>{
     const n = c[cause.key] || 0;
@@ -1317,17 +1332,17 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
       ctx.drawImage(icon, marginX, y - iconSize + 8, iconSize, iconSize);
     } else {
       ctx.fillStyle = hex;
-      ctx.beginPath(); ctx.arc(marginX + 9, y - 10, 9, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(marginX + 11, y - 12, 11, 0, Math.PI*2); ctx.fill();
     }
 
     ctx.fillStyle = '#e8edf7';
     ctx.font = `600 ${rowFont}px Inter, sans-serif`;
-    ctx.fillText(cause.label, marginX + iconSize + 14, y);
+    ctx.fillText(cause.label, marginX + iconSize + 16, y);
 
     ctx.textAlign = 'right';
     ctx.font = `700 ${rowFont}px "JetBrains Mono", monospace`;
     ctx.fillStyle = '#e8edf7';
-    ctx.fillText(String(n), W - marginX - 130, y);
+    ctx.fillText(String(n), W - marginX - 140, y);
     ctx.fillStyle = hex;
     ctx.fillText(pct + '%', W - marginX, y);
     ctx.textAlign = 'left';
@@ -1338,30 +1353,30 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
   y += 8;
   ctx.strokeStyle = 'rgba(255,255,255,.16)';
   ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
-  y += 56;
+  y += 60;
 
-  ctx.font = '600 30px Inter, sans-serif';
+  ctx.font = '600 36px Inter, sans-serif';
   ctx.fillStyle = '#8a95ac';
   ctx.fillText('TOTAL GERAL', marginX, y);
   ctx.textAlign = 'right';
-  ctx.font = '700 42px "JetBrains Mono", monospace';
+  ctx.font = '700 50px "JetBrains Mono", monospace';
   ctx.fillStyle = '#e8edf7';
-  ctx.fillText(String(total), W - marginX - 130, y);
+  ctx.fillText(String(total), W - marginX - 140, y);
   ctx.fillStyle = '#2fd6c4';
-  ctx.font = '700 30px "JetBrains Mono", monospace';
+  ctx.font = '700 36px "JetBrains Mono", monospace';
   ctx.fillText(total > 0 ? '100%' : '—', W - marginX, y);
   ctx.textAlign = 'left';
-  y += 64;
+  y += 70;
 
   // legenda / explicacoes — título maior, descrição um pouco menor, tudo alinhado
-  const legendIconSize = compact ? 24 : 28;
-  const labelFont = compact ? 27 : 30;
-  const descFont = compact ? 22 : 25;
-  const descLineH = compact ? 30 : 33;
-  const textX = marginX + legendIconSize + 14;
+  const legendIconSize = compact ? 30 : 34;
+  const labelFont = compact ? 34 : 38;
+  const descFont = compact ? 28 : 31;
+  const descLineH = compact ? 38 : 42;
+  const textX = marginX + legendIconSize + 16;
 
   causes.forEach(cause=>{
-    y += compact ? 30 : 36;
+    y += compact ? 34 : 40;
     const hex = cause.color || '#8a95ac';
     const icon = iconImages && iconImages[cause.key];
 
@@ -1375,7 +1390,7 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
     ctx.font = `700 ${labelFont}px "Space Grotesk", sans-serif`;
     ctx.fillStyle = hex;
     ctx.fillText(cause.label.toUpperCase(), textX, y);
-    y += labelFont + 8;
+    y += labelFont + 10;
 
     ctx.font = `400 ${descFont}px Inter, sans-serif`;
     ctx.fillStyle = '#aab4c8';
@@ -1388,7 +1403,7 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
 async function buildStatusCanvas(){
   if(document.fonts && document.fonts.ready){ try{ await document.fonts.ready; }catch(e){} }
   const W = 1080;
-  const causes = displayCauses();
+  const causes = sortedDisplayCauses();
   const compact = causes.length > 6;
 
   const iconImages = {};
