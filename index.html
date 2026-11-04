@@ -42,7 +42,7 @@
     padding:22px;
   }
   .mono{font-family:'JetBrains Mono',monospace;}
-  .shell{max-width:1180px; margin:0 auto; display:flex; flex-direction:column; gap:16px;}
+  .shell{max-width:1800px; margin:0 auto; display:flex; flex-direction:column; gap:16px;}
 
   /* ---- topbar ---- */
   .topbar{
@@ -208,6 +208,19 @@
   .row-remove:hover{color:var(--c-devolucao);}
   .log-empty{text-align:center; color:var(--text-dimmer); font-size:12.5px; padding:22px 0;}
 
+  /* ---- por rota ---- */
+  .route-wrap{overflow-x:auto;}
+  .route-table th, .route-table td{white-space:nowrap;}
+  .route-table th:not(:first-child), .route-table td:not(:first-child){text-align:center; font-family:'JetBrains Mono',monospace;}
+  .route-table td:first-child{font-family:'JetBrains Mono',monospace; font-weight:600;}
+  .route-table td.rt-total{font-weight:700; color:var(--text);}
+  .route-table tfoot td{font-weight:700; border-top:1px solid var(--border-2); padding:10px; font-family:'JetBrains Mono',monospace; text-align:center;}
+  .route-table tfoot td:first-child{text-align:left; font-family:'Inter',sans-serif;}
+  .route-th-dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; vertical-align:middle;}
+  .route-cell{cursor:pointer; font-family:'JetBrains Mono',monospace; color:var(--text-dim);}
+  .route-cell:hover{color:var(--accent);}
+  .route-empty{color:var(--text-dimmer); font-style:italic;}
+
   /* ---- history drawer ---- */
   .drawer-overlay{
     position:fixed; inset:0; background:rgba(4,10,20,.6); backdrop-filter:blur(2px);
@@ -324,6 +337,7 @@
   }
   .custom-cause-form input:focus{outline:none; border-color:var(--accent);}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 <div class="shell">
@@ -370,9 +384,13 @@
         <div class="cause-chip-select" id="causeChipSelect"></div>
       </div>
 
-      <textarea id="idsInput" placeholder="Cole os IDs — um por linha. Para já classificar, use: ID, motivo (ex: 123456, Recebidos)"></textarea>
+      <textarea id="idsInput" placeholder="Cole os IDs — um por linha. Pode colar as colunas ID / Motivo / Rota direto do Excel (ex: 123456  RECEBIDO  VF7_PM1)"></textarea>
       <div class="queue-actions">
-        <button class="btn primary" id="addBtn">Adicionar à fila</button>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn primary" id="addBtn">Adicionar à fila</button>
+          <button class="btn" id="importBtn" title="Planilha da análise (ID / LOCAS / ROTAS) ou a base do sistema (só os 'Na estação')">Importar planilha</button>
+          <input type="file" id="importFile" accept=".xlsx,.xls,.csv" class="hidden">
+        </div>
         <div class="pending-count">Pendentes: <b id="pendingCount">0</b></div>
       </div>
       <div class="pending-list" id="pendingList"></div>
@@ -409,13 +427,25 @@
   </div>
 
   <section class="panel">
+    <h2>Faltantes por rota <span class="sub" id="routeSub">rotas × causas</span></h2>
+    <div class="route-wrap">
+      <table class="route-table">
+        <thead id="routeHead"></thead>
+        <tbody id="routeBody"></tbody>
+        <tfoot id="routeFoot"></tfoot>
+      </table>
+    </div>
+    <div class="log-empty hidden" id="routeEmpty">Nenhuma rota informada ainda. Cole as linhas com a rota (ex: <span class="mono">48353789460 RECEBIDO VF7_PM1</span>) — dá pra copiar as 3 colunas direto do Excel.</div>
+  </section>
+
+  <section class="panel">
     <div class="log-header">
       <h2 style="margin-bottom:0">Pacotes classificados</h2>
-      <input id="searchInput" placeholder="Buscar por ID...">
+      <input id="searchInput" placeholder="Buscar por ID ou rota...">
     </div>
     <table>
       <thead>
-        <tr><th>ID do pacote</th><th>Causa</th><th>Horário</th><th></th></tr>
+        <tr><th>ID do pacote</th><th>Causa</th><th>Rota</th><th>Horário</th><th></th></tr>
       </thead>
       <tbody id="logBody"></tbody>
     </table>
@@ -581,10 +611,10 @@ function nextColorForSeed(key){
   return CAUSE_PALETTE[idx >= 0 ? idx : 0];
 }
 
-let state = { cycle:'PM1', date:new Date().toISOString().slice(0,10), pending:[], classified:[], causes: [], pendingHints:{} };
+let state = { cycle:'PM1', date:'', pending:[], classified:[], causes: [], pendingHints:{}, pendingRoutes:{} };
 let history = [];
 
-function todayISO(){ return new Date().toISOString().slice(0,10); }
+function todayISO(){ const d=new Date(); return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,10); }
 
 async function loadState(){
   try{
@@ -601,9 +631,11 @@ async function loadState(){
   if(!Array.isArray(state.causes)) state.causes = [];
   state.causes.forEach(c=>{ if(!c.icon) c.icon = iconForCause(c.label); if(!Array.isArray(c.aliases)) c.aliases = []; });
   if(!state.pendingHints || typeof state.pendingHints !== 'object') state.pendingHints = {};
+  if(!state.pendingRoutes || typeof state.pendingRoutes !== 'object') state.pendingRoutes = {};
 
   document.getElementById('cycleInput').value = state.cycle;
-  document.getElementById('dateInput').value = state.date || todayISO();
+  if(!state.date) state.date = todayISO();
+  document.getElementById('dateInput').value = state.date;
   render();
 }
 
@@ -722,6 +754,31 @@ function findOrCreateCauseByText(text){
   return newCause;
 }
 
+// Rota no formato do Meli: letras + número + "_" + ciclo (A1_PM1, VF13_PM1, VG7_AM1, C2_SD...)
+const ROUTE_RE = /^[A-Za-z]{1,4}\d{1,3}_[A-Za-z0-9]{1,5}$/;
+function normalizeRoute(r){ return (r||'').trim().toUpperCase(); }
+// Separa a rota do resto da linha. Aceita colunas do Excel (tab) ou rota no fim/meio da linha com espaços.
+function extractRoute(rawLine){
+  if(rawLine.includes('\t')){
+    const parts = rawLine.split('\t').map(p=>p.trim()).filter(Boolean);
+    const idx = parts.findIndex((p,i)=> i>0 && ROUTE_RE.test(p));
+    if(idx > -1){
+      const route = normalizeRoute(parts[idx]);
+      parts.splice(idx,1);
+      return { line: parts.join(' '), route };
+    }
+    return { line: parts.join(' '), route: '' };
+  }
+  const tokens = rawLine.trim().split(/[\s,;|]+/).filter(Boolean);
+  const idx = tokens.findIndex((t,i)=> i>0 && ROUTE_RE.test(t));
+  if(idx > -1){
+    const route = normalizeRoute(tokens[idx]);
+    tokens.splice(idx,1);
+    return { line: tokens.join(' '), route };
+  }
+  return { line: rawLine.trim(), route: '' };
+}
+
 function addIds(){
   const raw = document.getElementById('idsInput').value;
   const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
@@ -733,7 +790,10 @@ function addIds(){
   let addedPending = 0, addedClassified = 0;
   const notRecognizedTexts = [];
 
-  lines.forEach(line=>{
+  lines.forEach(rawLine=>{
+    // pula cabeçalho colado do Excel (ID´S / LOCAS / ROTAS) — linha sem nenhum número
+    if(!/\d/.test(rawLine)) return;
+    const {line, route} = extractRoute(rawLine);
     // "ID <separador> motivo" — separador pode ser vírgula, ponto e vírgula, barra, tab, dois-pontos,
     // hífen ou simplesmente espaço(s); só conta como motivo se sobrar texto com letras
     const withCause = line.match(/^([A-Za-z0-9]+)[\s,;:|\-]+(.+)$/);
@@ -745,7 +805,7 @@ function addIds(){
       if(cause){
         newlyClassified.push({
           id, cause:cause.key, label:cause.label, color:cause.color, desc:cause.desc, icon:cause.icon,
-          ts:new Date().toISOString()
+          route, ts:new Date().toISOString()
         });
         classifiedSet.add(id);
         addedClassified++;
@@ -755,6 +815,7 @@ function addIds(){
         addedPending++;
         notRecognizedTexts.push(motivoCandidate);
         state.pendingHints[id] = motivoCandidate;
+        if(route) state.pendingRoutes[id] = route;
       }
       return;
     }
@@ -764,6 +825,7 @@ function addIds(){
       state.pending.push(id);
       pendingSet.add(id);
       addedPending++;
+      if(route) state.pendingRoutes[id] = route;
     });
   });
 
@@ -796,8 +858,10 @@ function classify(id, causeKey){
     if(!already) cause.aliases.push(hint);
   }
   delete state.pendingHints[id];
+  const route = state.pendingRoutes[id] || '';
+  delete state.pendingRoutes[id];
   state.classified.unshift({
-    id, cause:causeKey,
+    id, cause:causeKey, route,
     label: cause ? cause.label : causeKey,
     color: cause ? cause.color : '#8a95ac',
     desc: cause ? cause.desc : '',
@@ -810,6 +874,7 @@ function classify(id, causeKey){
 function unpend(id){
   state.pending = state.pending.filter(x=>x!==id);
   delete state.pendingHints[id];
+  delete state.pendingRoutes[id];
   saveState(); render();
 }
 
@@ -870,7 +935,7 @@ function render(){
   } else {
     list.innerHTML = state.pending.map(id => `
       <div class="pending-item">
-        <span class="pending-id" title="${id}">${id}${state.pendingHints[id] ? `<br><small class="pending-hint" title="Texto original — não reconhecido automaticamente">"${state.pendingHints[id].replace(/</g,'&lt;')}"</small>` : ''}</span>
+        <span class="pending-id" title="${id}">${id}${state.pendingRoutes[id] ? ` <small style="color:var(--accent)">${state.pendingRoutes[id]}</small>` : ''}${state.pendingHints[id] ? `<br><small class="pending-hint" title="Texto original — não reconhecido automaticamente">"${state.pendingHints[id].replace(/</g,'&lt;')}"</small>` : ''}</span>
         <div class="tag-buttons">
           ${causes.map(c=>`<button class="tag-pill-btn" title="${c.desc}" style="background:color-mix(in srgb, ${c.color} 16%, transparent); color:${c.color}; border-color:color-mix(in srgb, ${c.color} 40%, transparent)" onclick="classify('${id.replace(/'/g,"\\'")}','${c.key}')">${c.label}</button>`).join('')}
           <button class="remove-x" title="Remover da fila" onclick="unpend('${id.replace(/'/g,"\\'")}')">${ICONS.x}</button>
@@ -919,11 +984,13 @@ function render(){
         </tr>`;
     }).join('');
 
+  renderRoutes();
+
   // log
   const search = (document.getElementById('searchInput').value || '').trim().toLowerCase();
   const rows = state.classified
     .map((item, idx)=>({...item, idx}))
-    .filter(item => !search || item.id.toLowerCase().includes(search));
+    .filter(item => !search || item.id.toLowerCase().includes(search) || (item.route||'').toLowerCase().includes(search));
 
   const body = document.getElementById('logBody');
   const empty = document.getElementById('logEmpty');
@@ -938,11 +1005,69 @@ function render(){
         <tr>
           <td class="id-cell">${item.id}</td>
           <td><span class="tag-pill" style="background:color-mix(in srgb, ${item.color} 18%, transparent); color:${item.color}">${item.label}</span></td>
+          <td class="route-cell" title="Clique pra editar a rota" onclick="editRoute(${item.idx})">${item.route ? item.route : '<span class="route-empty">+ rota</span>'}</td>
           <td class="mono" style="color:var(--text-dim)">${time}</td>
           <td><button class="row-remove" onclick="unclassify(${item.idx})">remover</button></td>
         </tr>`;
     }).join('');
   }
+}
+
+// ---- agrupamento por rota (igual à tabela dinâmica do Excel) ----
+function routeKey(item){ return item.route || '(sem rota)'; }
+function routeBreakdown(){
+  const map = {};
+  state.classified.forEach(item=>{
+    const r = routeKey(item);
+    if(!map[r]) map[r] = { route:r, total:0, byCause:{} };
+    map[r].total++;
+    map[r].byCause[item.cause] = (map[r].byCause[item.cause]||0) + 1;
+  });
+  return Object.values(map).sort((a,b)=>{
+    if(a.route==='(sem rota)') return 1;
+    if(b.route==='(sem rota)') return -1;
+    return a.route.localeCompare(b.route, 'pt-BR', {numeric:true});
+  });
+}
+function routesForCause(key){
+  const m = {};
+  state.classified.forEach(i=>{ if(i.cause===key && i.route) m[i.route]=(m[i.route]||0)+1; });
+  return Object.entries(m).sort((a,b)=>a[0].localeCompare(b[0],'pt-BR',{numeric:true}))
+    .map(([r,n])=> n>1 ? `${r} (${n})` : r);
+}
+function hasRoutes(){ return state.classified.some(i=>i.route); }
+
+function editRoute(idx){
+  const item = state.classified[idx];
+  if(!item) return;
+  const val = prompt(`Rota do pacote ${item.id}:`, item.route || '');
+  if(val === null) return;
+  item.route = normalizeRoute(val);
+  saveState(); render();
+}
+
+function renderRoutes(){
+  const head = document.getElementById('routeHead');
+  const body = document.getElementById('routeBody');
+  const foot = document.getElementById('routeFoot');
+  const empty = document.getElementById('routeEmpty');
+  if(!hasRoutes()){
+    head.innerHTML = body.innerHTML = foot.innerHTML = '';
+    empty.classList.remove('hidden');
+    document.getElementById('routeSub').textContent = 'rotas × causas';
+    return;
+  }
+  empty.classList.add('hidden');
+  const causes = sortedDisplayCauses();
+  const rows = routeBreakdown();
+  const {c, total} = counts();
+  document.getElementById('routeSub').textContent = `${rows.filter(r=>r.route!=='(sem rota)').length} rota(s)`;
+  head.innerHTML = `<tr><th>Rota</th>${causes.map(cs=>`<th><span class="route-th-dot" style="background:${cs.color}"></span>${cs.label}</th>`).join('')}<th>Total</th></tr>`;
+  body.innerHTML = rows.map(r=>`<tr>
+      <td>${r.route==='(sem rota)' ? '<span class="route-empty">(sem rota)</span>' : r.route}</td>
+      ${causes.map(cs=>{ const n=r.byCause[cs.key]||0; return `<td style="color:${n?cs.color:'var(--text-dimmer)'}">${n||''}</td>`; }).join('')}
+      <td class="rt-total">${r.total}</td></tr>`).join('');
+  foot.innerHTML = `<tr><td>Total Geral</td>${causes.map(cs=>`<td style="color:${cs.color}">${c[cs.key]||0}</td>`).join('')}<td>${total}</td></tr>`;
 }
 
 function buildSummaryText(){
@@ -955,6 +1080,14 @@ function buildSummaryText(){
     lines.push(`${cause.label.toUpperCase()}: ${n} (${pct}%) — ${cause.desc}`);
   });
   lines.push('', `TOTAL GERAL: ${total}`);
+  if(hasRoutes()){
+    const byKey = Object.fromEntries(causes.map(cs=>[cs.key, cs.label]));
+    lines.push('', 'POR ROTA:');
+    routeBreakdown().forEach(r=>{
+      const det = Object.entries(r.byCause).map(([k,n])=>`${byKey[k]||k} ${n}`).join(', ');
+      lines.push(`${r.route}: ${r.total} (${det})`);
+    });
+  }
   return lines.join('\n');
 }
 
@@ -973,7 +1106,7 @@ async function archiveCurrentCycle(){
   history.unshift({
     cycle: state.cycle, date: state.date,
     causes: sortedDisplayCauses(),
-    counts: c, total,
+    counts: c, total, routes: routeBreakdown(),
     finishedAt: new Date().toISOString()
   });
   await saveHistory();
@@ -988,7 +1121,7 @@ async function finalizeCycle(){
   if(!confirm(`Finalizar o ciclo ${state.cycle} e começar um novo? O resumo será salvo no histórico.`)) return;
 
   await archiveCurrentCycle();
-  state = { cycle: state.cycle, date: todayISO(), pending: [], classified: [], causes: state.causes, pendingHints: {} };
+  state = { cycle: state.cycle, date: todayISO(), pending: [], classified: [], causes: state.causes, pendingHints: {}, pendingRoutes: {} };
   document.getElementById('dateInput').value = state.date;
   await saveState();
   render();
@@ -1171,6 +1304,72 @@ function addCustomCause(){
 
 // events
 document.getElementById('addBtn').addEventListener('click', addIds);
+document.getElementById('importBtn').addEventListener('click', ()=>document.getElementById('importFile').click());
+document.getElementById('importFile').addEventListener('change', e=>{
+  const f = e.target.files[0]; e.target.value = '';
+  if(f) importSpreadsheet(f);
+});
+
+// ---- importação de planilha ----
+// Aceita: (1) aba de análise com ID / LOCAS (motivo) / ROTAS -> já entra classificado com rota
+//         (2) base do sistema (ID do pacote, N.º Rota, Localização do pacote) -> só os "Na estação" vão pra fila com a rota
+// Se o arquivo tiver as duas (como a BASE_FALTANTES), usa a aba de análise.
+function cellId(v){
+  if(v === null || v === undefined || v === '') return '';
+  if(typeof v === 'number') return String(Math.round(v));
+  return String(v).trim();
+}
+function findCol(header, re, notRe){
+  return header.findIndex(h => re.test(normalizeText(h)) && !(notRe && notRe.test(normalizeText(h))));
+}
+async function importSpreadsheet(file){
+  if(typeof XLSX === 'undefined'){ showToast('Não carregou o leitor de planilha — confira a internet'); return; }
+  try{
+    const wb = XLSX.read(await file.arrayBuffer(), {type:'array'});
+    let analysis = null, base = null;
+    wb.SheetNames.forEach(name=>{
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], {header:1, raw:true, defval:''});
+      const hIdx = rows.findIndex(r => r.some(c => /^id/.test(normalizeText(c))));
+      if(hIdx < 0) return;
+      const header = rows[hIdx].map(h=>String(h));
+      const body = rows.slice(hIdx+1);
+      const idCol = findCol(header, /^id/);
+      const routeCol = findCol(header, /rota/);
+      const locPkg = findCol(header, /localizacao do pacote/);
+      const motiveCol = findCol(header, /^loca|motivo|causa|status/, /localizacao do pacote/);
+      if(motiveCol > -1 && !analysis) analysis = {body, idCol, routeCol, motiveCol};
+      else if(locPkg > -1 && !base) base = {body, idCol, routeCol, locPkg};
+    });
+
+    let lines = [], info = '';
+    if(analysis){
+      analysis.body.forEach(r=>{
+        const id = cellId(r[analysis.idCol]); if(!id) return;
+        const mot = String(r[analysis.motiveCol]||'').trim();
+        const rt = analysis.routeCol > -1 ? String(r[analysis.routeCol]||'').trim() : '';
+        lines.push([id, mot, rt].filter(Boolean).join('\t'));
+      });
+      info = `aba de análise: ${lines.length} pacote(s)`;
+    } else if(base){
+      let skipped = 0;
+      base.body.forEach(r=>{
+        const id = cellId(r[base.idCol]); if(!id) return;
+        if(!/na estacao/.test(normalizeText(r[base.locPkg]))){ skipped++; return; }
+        const rt = base.routeCol > -1 ? String(r[base.routeCol]||'').trim() : '';
+        lines.push([id, rt].filter(Boolean).join('\t'));
+      });
+      info = `base: ${lines.length} "Na estação" (${skipped} em caminho ficaram de fora)`;
+    } else {
+      showToast('Não achei a coluna de ID nessa planilha'); return;
+    }
+    if(!lines.length){ showToast('Nenhum pacote encontrado na planilha'); return; }
+    document.getElementById('idsInput').value = lines.join('\n');
+    addIds();
+    setTimeout(()=>showToast(`Importado da ${info} · ` + document.getElementById('toast').textContent), 50);
+  }catch(err){
+    showToast('Não consegui ler essa planilha');
+  }
+}
 document.getElementById('idsInput').addEventListener('keydown', e=>{
   if(e.key==='Enter' && e.ctrlKey) addIds();
 });
@@ -1259,13 +1458,16 @@ function loadCauseIcon(cause){
   });
 }
 
-function drawStatusContent(ctx, W, causes, compact, iconImages){
+function drawStatusContent(ctx, W, causes, compact, iconImages, wide){
   const marginX = 64;
+  // modo largo: causas na coluna da esquerda, pacotes por rota na da direita
+  const LR = wide ? marginX + 760 : W - marginX;
+  const RX = wide ? LR + 90 : marginX;
   let y = 90;
 
   // fundo
   ctx.fillStyle = '#0a1424';
-  ctx.fillRect(0, 0, W, 3000);
+  ctx.fillRect(0, 0, W, 8000);
   ctx.fillStyle = '#2fd6c4';
   ctx.fillRect(0, 0, W, 6);
 
@@ -1302,6 +1504,7 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
   ctx.strokeStyle = 'rgba(255,255,255,.14)';
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
+  const yTop = y;
   y += 50;
 
   // cabecalho da tabela
@@ -1309,12 +1512,12 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
   ctx.fillStyle = '#5d6884';
   ctx.fillText('CAUSA', marginX, y);
   ctx.textAlign = 'right';
-  ctx.fillText('CONTAGEM DE PACOTES', W - marginX - 140, y);
-  ctx.fillText('PERCENTUAL', W - marginX, y);
+  ctx.fillText('PACOTES', LR - 140, y);
+  ctx.fillText('%', LR, y);
   ctx.textAlign = 'left';
   y += 20;
   ctx.strokeStyle = 'rgba(255,255,255,.08)';
-  ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(LR, y); ctx.stroke();
   y += compact ? 54 : 62;
 
   const {c, total} = counts();
@@ -1336,15 +1539,19 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
     }
 
     ctx.fillStyle = '#e8edf7';
-    ctx.font = `600 ${rowFont}px Inter, sans-serif`;
+    // encolhe o nome se encostar na coluna de contagem
+    let lf = rowFont;
+    ctx.font = `600 ${lf}px Inter, sans-serif`;
+    const labelMax = (LR - 140 - 70) - (marginX + iconSize + 16);
+    while(ctx.measureText(cause.label).width > labelMax && lf > 22){ lf -= 1; ctx.font = `600 ${lf}px Inter, sans-serif`; }
     ctx.fillText(cause.label, marginX + iconSize + 16, y);
 
     ctx.textAlign = 'right';
     ctx.font = `700 ${rowFont}px "JetBrains Mono", monospace`;
     ctx.fillStyle = '#e8edf7';
-    ctx.fillText(String(n), W - marginX - 140, y);
+    ctx.fillText(String(n), LR - 140, y);
     ctx.fillStyle = hex;
-    ctx.fillText(pct + '%', W - marginX, y);
+    ctx.fillText(pct + '%', LR, y);
     ctx.textAlign = 'left';
 
     y += rowGap;
@@ -1352,7 +1559,7 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
 
   y += 8;
   ctx.strokeStyle = 'rgba(255,255,255,.16)';
-  ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(marginX, y); ctx.lineTo(LR, y); ctx.stroke();
   y += 60;
 
   ctx.font = '600 36px Inter, sans-serif';
@@ -1361,10 +1568,10 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
   ctx.textAlign = 'right';
   ctx.font = '700 50px "JetBrains Mono", monospace';
   ctx.fillStyle = '#e8edf7';
-  ctx.fillText(String(total), W - marginX - 140, y);
+  ctx.fillText(String(total), LR - 140, y);
   ctx.fillStyle = '#2fd6c4';
   ctx.font = '700 36px "JetBrains Mono", monospace';
-  ctx.fillText(total > 0 ? '100%' : '—', W - marginX, y);
+  ctx.fillText(total > 0 ? '100%' : '—', LR, y);
   ctx.textAlign = 'left';
   y += 70;
 
@@ -1394,15 +1601,113 @@ function drawStatusContent(ctx, W, causes, compact, iconImages){
 
     ctx.font = `400 ${descFont}px Inter, sans-serif`;
     ctx.fillStyle = '#aab4c8';
-    y = wrapText(ctx, cause.desc, textX, y, W - textX - marginX, descLineH);
+    y = wrapText(ctx, cause.desc, textX, y, LR - textX, descLineH);
   });
 
-  return y;
+  // ---- por rota: ROTA | ID DO PACOTE | STATUS, com qtd por rota e total no final ----
+  const yLeft = y;
+  if(hasRoutes()){
+    if(wide){
+      y = yTop + 62;
+    } else {
+      y += 30;
+      ctx.strokeStyle = 'rgba(255,255,255,.16)';
+      ctx.beginPath(); ctx.moveTo(RX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
+      y += 66;
+    }
+    ctx.font = '700 40px "Space Grotesk", sans-serif';
+    ctx.fillStyle = '#e8edf7';
+    ctx.fillText('PACOTES POR ROTA', RX, y);
+    y += 56;
+
+    const idX = RX + 200, statusX = RX + 420;
+    ctx.font = '600 24px Inter, sans-serif';
+    ctx.fillStyle = '#5d6884';
+    ctx.fillText('ROTA', RX, y);
+    ctx.fillText('ID DO PACOTE', idX, y);
+    ctx.fillText('STATUS', statusX, y);
+    ctx.textAlign = 'right'; ctx.fillText('QTD', W - marginX, y); ctx.textAlign = 'left';
+    y += 20;
+    ctx.strokeStyle = 'rgba(255,255,255,.08)';
+    ctx.beginPath(); ctx.moveTo(RX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
+
+    const order = Object.fromEntries(causes.map((cs,i)=>[cs.key,i]));
+    const colorOf = Object.fromEntries(causes.map(cs=>[cs.key, cs.color]));
+    const labelOf = Object.fromEntries(causes.map(cs=>[cs.key, cs.label]));
+    const rows = routeBreakdown();
+    const small = state.classified.length > 40;
+    const fs = small ? 26 : 30;
+    const lineH = small ? 42 : 50;
+    const statusMax = W - marginX - 60 - statusX - 26;
+
+    rows.forEach((r, ri)=>{
+      const items = state.classified.filter(i => routeKey(i) === r.route)
+        .sort((a,b)=> (order[a.cause]??99) - (order[b.cause]??99) || String(a.id).localeCompare(String(b.id)));
+      const top = y;
+      items.forEach((item, i)=>{
+        y += lineH;
+        if(i === 0){
+          ctx.font = `700 ${fs}px "JetBrains Mono", monospace`;
+          ctx.fillStyle = r.route==='(sem rota)' ? '#5d6884' : '#e8edf7';
+          ctx.fillText(r.route, RX, y);
+        }
+        if(i === 0){
+          // quantidade da rota na coluna QTD
+          ctx.textAlign = 'right';
+          ctx.font = `700 ${fs}px "JetBrains Mono", monospace`;
+          ctx.fillStyle = '#2fd6c4';
+          ctx.fillText(String(r.total), W - marginX, y);
+          ctx.textAlign = 'left';
+        }
+        ctx.font = `500 ${fs}px "JetBrains Mono", monospace`;
+        ctx.fillStyle = '#c9d2e3';
+        ctx.fillText(String(item.id), idX, y);
+
+        const hex = colorOf[item.cause] || item.color || '#8a95ac';
+        ctx.fillStyle = hex;
+        ctx.beginPath(); ctx.arc(statusX + 8, y - fs*0.35, 8, 0, Math.PI*2); ctx.fill();
+        let label = labelOf[item.cause] || item.label;
+        let sf = fs;
+        ctx.font = `600 ${sf}px Inter, sans-serif`;
+        while(ctx.measureText(label).width > statusMax && sf > 22){ sf -= 1; ctx.font = `600 ${sf}px Inter, sans-serif`; }
+        while(ctx.measureText(label).width > statusMax && label.length > 4) label = label.slice(0,-2).trimEnd() + '…';
+        ctx.fillText(label.replace(/……$/,'…'), statusX + 26, y);
+      });
+      y += small ? 14 : 18;
+      if(ri < rows.length-1){
+        ctx.strokeStyle = 'rgba(255,255,255,.07)';
+        ctx.beginPath(); ctx.moveTo(RX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
+      }
+    });
+
+    y += 20;
+    ctx.strokeStyle = 'rgba(255,255,255,.2)';
+    ctx.beginPath(); ctx.moveTo(RX, y); ctx.lineTo(W-marginX, y); ctx.stroke();
+    y += 64;
+    ctx.font = '700 36px Inter, sans-serif';
+    ctx.fillStyle = '#e8edf7';
+    const nRoutes = rows.filter(r=>r.route!=='(sem rota)').length;
+    ctx.fillText(`TOTAL GERAL · ${nRoutes} rota(s)`, RX, y);
+    ctx.textAlign = 'right';
+    ctx.font = '700 48px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#2fd6c4';
+    ctx.fillText(`${state.classified.length} pacotes`, W - marginX, y);
+    ctx.textAlign = 'left';
+    y += 30;
+  }
+
+  const yEnd = Math.max(y, yLeft);
+  if(wide && hasRoutes()){
+    ctx.strokeStyle = 'rgba(255,255,255,.10)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(RX - 45, yTop + 30); ctx.lineTo(RX - 45, yEnd); ctx.stroke();
+  }
+  return yEnd;
 }
 
 async function buildStatusCanvas(){
   if(document.fonts && document.fonts.ready){ try{ await document.fonts.ready; }catch(e){} }
-  const W = 1080;
+  const wide = hasRoutes();
+  const W = wide ? 1920 : 1080;
   const causes = sortedDisplayCauses();
   const compact = causes.length > 6;
 
@@ -1412,9 +1717,9 @@ async function buildStatusCanvas(){
   }));
 
   const scratch = document.createElement('canvas');
-  scratch.width = W; scratch.height = 3000;
+  scratch.width = W; scratch.height = 8000;
   const sctx = scratch.getContext('2d');
-  const finalY = drawStatusContent(sctx, W, causes, compact, iconImages);
+  const finalY = drawStatusContent(sctx, W, causes, compact, iconImages, wide);
 
   const H = Math.ceil(finalY) + 90;
   const canvas = document.createElement('canvas');
